@@ -949,6 +949,9 @@
      * Chance, les cartes Action en main et le panneau de paramétrage.
      ***************************************************************************/
     const ACTION_REGISTRY = {};
+    // Actions tournantes : un ensemble différent est sélectionné à chaque nouvelle partie.
+    let currentRotationActionIds = [];
+    const ROTATION_HISTORY_KEY = "vibeoie_rotation_history_v2";
 
     function registerGooseAction(actionSpec) {
       if (!actionSpec || !actionSpec.id || typeof actionSpec.execute !== 'function') {
@@ -976,6 +979,16 @@
         return bounce ? maxCell - (pos - maxCell) : maxCell;
       }
       return pos;
+    }
+
+    function moveBackwards(player, amount) {
+      if (player.protectedFromBack) {
+        player.protectedFromBack = false;
+        return { moved: 0, protected: true };
+      }
+      const before = player.position;
+      player.position = Math.max(1, player.position - amount);
+      return { moved: before - player.position, protected: false };
     }
 
     // --- ENREGISTREMENT DES ACTIONS DE BASE DEMANDÉES ---
@@ -1039,10 +1052,10 @@
       canBePlayerCard: false,
       execute: function(gameState, playerId, context) {
         const player = gameState.players.find(p => p.id === playerId);
-        player.position = Math.max(1, player.position - 2);
+        const back = moveBackwards(player, 2);
         return {
           gameState,
-          message: `${player.name} recule de 2 cases et se retrouve en case ${player.position}.`,
+          message: back.protected ? `${player.name} utilise sa protection et ne recule pas !` : `${player.name} recule de 2 cases et se retrouve en case ${player.position}.`,
           extraTurn: false,
           triggerChanceCard: false
         };
@@ -1207,10 +1220,10 @@
       canBePlayerCard: false,
       execute: function(gameState, playerId, context) {
         const player = gameState.players.find(p => p.id === playerId);
-        player.position = Math.max(1, player.position - 4);
+        const back = moveBackwards(player, 4);
         return {
           gameState,
-          message: `${player.name} se perd dans le Labyrinthe et recule en case ${player.position}.`,
+          message: back.protected ? `${player.name} est protégé et évite le Labyrinthe !` : `${player.name} se perd dans le Labyrinthe et recule en case ${player.position}.`,
           extraTurn: false,
           triggerChanceCard: false
         };
@@ -1253,10 +1266,10 @@
       canBePlayerCard: false,
       execute: function(gameState, playerId, context) {
         const player = gameState.players.find(p => p.id === playerId);
-        player.position = Math.max(1, player.position - 8);
+        const back = moveBackwards(player, 8);
         return {
           gameState,
-          message: `Aïe ! ${player.name} glisse dans la mare et recule de 8 cases (case ${player.position}).`,
+          message: back.protected ? `${player.name} est protégé et évite la mare !` : `Aïe ! ${player.name} glisse dans la mare et recule de 8 cases (case ${player.position}).`,
           extraTurn: false,
           triggerChanceCard: false
         };
@@ -1279,6 +1292,97 @@
       canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: false,
       execute: function(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); gameState.players.filter(x => x.id !== playerId).forEach(x => x.position = Math.max(1, x.position - 1)); return { gameState, message: `Le vent ralentit les adversaires de ${p.name} !`, extraTurn: false, triggerChanceCard: false }; }
     });
+
+    // Banque d'actions inédites. Cinq d'entre elles sont activées à chaque partie.
+    // Le registre et la signature execute(gameState, playerId, context) restent inchangés.
+    const ROTATING_ACTION_IDS = [];
+    function registerRotatingAction(spec) {
+      registerGooseAction(spec);
+      ACTION_REGISTRY[spec.id].rotationPool = true;
+      ACTION_REGISTRY[spec.id].gameEnabled = false;
+      ROTATING_ACTION_IDS.push(spec.id);
+    }
+
+    registerRotatingAction({
+      id: "secret_path", name: "Sentier secret", description: "Avancez de 5 cases, puis le jeu applique le rebond habituel à l'arrivée.", icon: "🌿", theme: "green", defaultWeight: 9,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); p.position = clampOrBouncePosition(p.position + 5, gameState.maxCell, gameState.config.exactBounce); return { gameState, message: `${p.name} découvre un sentier secret et arrive en case ${p.position}.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "puddle_slide", name: "Glissade", description: "Reculez de 3 cases à cause d'une flaque.", icon: "💦", theme: "blue", defaultWeight: 8,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); const back = moveBackwards(p, 3); return { gameState, message: back.protected ? `${p.name} est protégé contre la glissade !` : `${p.name} glisse et recule en case ${p.position}.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "garden_guard", name: "Garde du jardin", description: "Gagnez une protection qui annule le prochain recul subi.", icon: "🛡️", theme: "blue", defaultWeight: 7,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); p.protectedFromBack = true; return { gameState, message: `${p.name} est protégé contre le prochain recul.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "snack_break", name: "Goûter", description: "Avancez de 2 cases et recevez un lancer supplémentaire.", icon: "🍪", theme: "yellow", defaultWeight: 6,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); p.position = clampOrBouncePosition(p.position + 2, gameState.maxCell, gameState.config.exactBounce); return { gameState, message: `${p.name} prend un goûter et avance en case ${p.position} : relance !`, extraTurn: true, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "mud_trap", name: "Boue collante", description: "Le joueur le plus avancé recule de 3 cases.", icon: "🟤", theme: "red", defaultWeight: 6,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: false,
+      execute(gameState, playerId) { const target = [...gameState.players].sort((a,b) => b.position-a.position)[0]; const back = moveBackwards(target, 3); return { gameState, message: back.protected ? `${target.name} est protégé contre la boue !` : `La boue ralentit ${target.name}, qui recule en case ${target.position}.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "team_boost", name: "Coup de main", description: "Vous et le joueur dernier avancez chacun de 2 cases (une seule fois si c'est le même joueur).", icon: "🤝", theme: "green", defaultWeight: 7,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); const last = [...gameState.players].sort((a,b) => a.position-b.position)[0]; p.position = clampOrBouncePosition(p.position + 2, gameState.maxCell, gameState.config.exactBounce); if (last.id !== p.id) last.position = clampOrBouncePosition(last.position + 2, gameState.maxCell, gameState.config.exactBounce); return { gameState, message: `${p.name} donne un coup de main : les pions concernés avancent de 2 cases.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "backwind", name: "Rafale arrière", description: "Tous les autres joueurs avancent d'une case, vous reculez d'une case.", icon: "🌪️", theme: "purple", defaultWeight: 5,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: false,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); const back = moveBackwards(p, 1); gameState.players.filter(x => x.id !== playerId).forEach(x => x.position = clampOrBouncePosition(x.position + 1, gameState.maxCell, gameState.config.exactBounce)); return { gameState, message: back.protected ? `La protection de ${p.name} annule le recul, mais les autres avancent.` : `Rafale ! ${p.name} recule tandis que les autres avancent.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "lucky_dice", name: "Dé porte-bonheur", description: "Avancez du dernier résultat des dés une seconde fois, avec un minimum de 2 cases.", icon: "🎲", theme: "yellow", defaultWeight: 8,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId, context) { const p = gameState.players.find(x => x.id === playerId); const n = Math.max(2, Number(context && context.lastRoll) || 2); p.position = clampOrBouncePosition(p.position + n, gameState.maxCell, gameState.config.exactBounce); return { gameState, message: `Le dé porte-bonheur fait avancer ${p.name} de ${n} cases, jusqu'en ${p.position}.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "trade_cards", name: "Échange de cartes", description: "Échangez une carte Action avec le joueur qui en possède le plus (si possible).", icon: "🃏", theme: "purple", defaultWeight: 5,
+      canBeOnBoard: false, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); const target = [...gameState.players].filter(x => x.id !== playerId && x.hand && x.hand.length).sort((a,b) => b.hand.length-a.hand.length)[0]; if (!p.hand) p.hand=[]; if (!target || !p.hand.length) return { gameState, message: `Pas d'échange de cartes possible pour ${p.name}.`, extraTurn: false, triggerChanceCard: false }; const a=p.hand.shift(); const b=target.hand.shift(); p.hand.push(b); target.hand.push(a); return { gameState, message: `${p.name} échange une carte avec ${target.name}.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "flower_field", name: "Champ de fleurs", description: "Avancez de 4 cases si vous êtes dernier, sinon de 2 cases.", icon: "🌼", theme: "green", defaultWeight: 8,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); const min = Math.min(...gameState.players.map(x => x.position)); const n = p.position === min ? 4 : 2; p.position = clampOrBouncePosition(p.position+n, gameState.maxCell, gameState.config.exactBounce); return { gameState, message: `${p.name} traverse le champ de fleurs et avance de ${n} cases.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "short_cut", name: "Raccourci", description: "Rejoignez le joueur immédiatement devant vous, sans le dépasser.", icon: "🧭", theme: "blue", defaultWeight: 5,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: true,
+      execute(gameState, playerId) { const p = gameState.players.find(x => x.id === playerId); const next = gameState.players.filter(x => x.id !== playerId && x.position > p.position).sort((a,b)=>a.position-b.position)[0]; if (!next) p.position=clampOrBouncePosition(p.position+2,gameState.maxCell,gameState.config.exactBounce); else p.position=Math.max(p.position, next.position-1); return { gameState, message: `${p.name} emprunte le raccourci et arrive en case ${p.position}.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+    registerRotatingAction({
+      id: "all_oies", name: "Course des oies", description: "Chaque joueur avance d'une case, vous compris.", icon: "🪿", theme: "yellow", defaultWeight: 6,
+      canBeOnBoard: true, canBeChanceCard: true, canBePlayerCard: false,
+      execute(gameState, playerId) { gameState.players.forEach(x => x.position=clampOrBouncePosition(x.position+1,gameState.maxCell,gameState.config.exactBounce)); const p=gameState.players.find(x=>x.id===playerId); return { gameState, message: `Course des oies ! Tous les joueurs avancent d'une case.`, extraTurn: false, triggerChanceCard: false }; }
+    });
+
+    const ROTATING_ACTIONS_PER_GAME = 5;
+    function activateRotationSet(ids) {
+      const set = new Set(ids || []);
+      ROTATING_ACTION_IDS.forEach(id => { ACTION_REGISTRY[id].gameEnabled = set.has(id); });
+      currentRotationActionIds = ROTATING_ACTION_IDS.filter(id => set.has(id));
+    }
+    function activateFreshActionSet() {
+      let previous = [];
+      try { previous = JSON.parse(localStorage.getItem(ROTATION_HISTORY_KEY) || "[]"); } catch (_) {}
+      let chosen = [];
+      // Réessaie jusqu'à obtenir une combinaison différente de la partie précédente.
+      for (let attempt = 0; attempt < 100; attempt++) {
+        chosen = [...ROTATING_ACTION_IDS].sort(() => Math.random() - 0.5).slice(0, ROTATING_ACTIONS_PER_GAME).sort();
+        if (chosen.join("|") !== [...previous].sort().join("|")) break;
+      }
+      activateRotationSet(chosen);
+      try { localStorage.setItem(ROTATION_HISTORY_KEY, JSON.stringify(chosen)); } catch (_) {}
+      return chosen;
+    }
 
     /***************************************************************************
      * 3. PALETTE DES PIONS & ÉTAT DU JEU (GAME STATE)
@@ -1321,7 +1425,7 @@
 
     function persistGame() {
       try {
-        const payload = { version: 2, gameState, undoSnapshot, soundEnabled, savedAt: new Date().toISOString() };
+        const payload = { version: 2, gameState, undoSnapshot, soundEnabled, currentRotationActionIds, savedAt: new Date().toISOString() };
         localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
         const status = document.getElementById("saveStatus");
         if (status) status.textContent = "Partie sauvegardée automatiquement";
@@ -1348,6 +1452,7 @@
         saved.board = saved.board.map((c, i) => ({ number: i + 1, actionId: c && ACTION_REGISTRY[c.actionId] ? c.actionId : null }));
         saved.history = Array.isArray(saved.history) ? saved.history.slice(-100) : [];
         gameState = saved;
+        activateRotationSet(Array.isArray(data.currentRotationActionIds) ? data.currentRotationActionIds : [...new Set([...(saved.board || []).map(c => c && c.actionId), ...(saved.players || []).flatMap(p => p.hand || [])].filter(id => ROTATING_ACTION_IDS.includes(id)))]);
         undoSnapshot = data.undoSnapshot && Array.isArray(data.undoSnapshot.players) ? data.undoSnapshot : null;
         soundEnabled = data.soundEnabled !== false;
         hasRestoredSave = true;
@@ -1448,7 +1553,7 @@
      * 5. SÉLECTION ALÉATOIRE PONDÉRÉE & GÉNÉRATION DU PLATEAU
      ***************************************************************************/
     function pickWeightedAction(filterFn) {
-      const eligible = Object.values(ACTION_REGISTRY).filter(a => a.weight > 0 && filterFn(a));
+      const eligible = Object.values(ACTION_REGISTRY).filter(a => a.weight > 0 && a.gameEnabled !== false && filterFn(a));
       if (eligible.length === 0) return null;
 
       const totalWeight = eligible.reduce((acc, a) => acc + a.weight, 0);
@@ -1493,6 +1598,7 @@
 
     function regenerateNewGame() {
       gameFinished = false;
+      const freshActions = activateFreshActionSet();
       undoSnapshot = null;
       generateDynamicBoard();
       gameState.turnIndex = 0;
@@ -1505,7 +1611,7 @@
       });
       dealInitialPlayerCards();
       gameState.history = [];
-      addHistoryLog(`Nouveau plateau généré (${gameState.config.boardCoverageProb}% de couverture). Bonne chance à tous !`, "info");
+      addHistoryLog(`Nouveau plateau généré (${gameState.config.boardCoverageProb}% de couverture). Actions spéciales de cette partie : ${freshActions.map(id => ACTION_REGISTRY[id].name).join(", ")}. Bonne chance à tous !`, "info");
       hideLiveActionBanner();
       renderAll();
       showToast("✨ Nouveau plateau généré avec actions aléatoires !");
